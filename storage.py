@@ -62,18 +62,6 @@ CREATE TABLE IF NOT EXISTS bets (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (tenant_id, game_code, issue, player_user_id, selection)
 );
-CREATE TABLE IF NOT EXISTS payment_requests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    player_user_id INTEGER NOT NULL,
-    amount_usdt REAL NOT NULL CHECK (amount_usdt > 0),
-    tx_reference TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'approved', 'rejected')),
-    reviewed_by INTEGER,
-    reviewed_at TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
 CREATE TABLE IF NOT EXISTS tenant_pricing (
     tenant_id INTEGER PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
     agreed_price REAL CHECK (agreed_price IS NULL OR agreed_price >= 0),
