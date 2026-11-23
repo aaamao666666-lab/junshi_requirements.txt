@@ -205,3 +205,61 @@ class SQLiteStore:
             )
             if cur.rowcount != 1:
                 raise ValueError("payment_request_not_pending")
+
+
+    def activate_subscription(self, tenant_id: int, days: int = 1) -> str:
+        if days < 1:
+            raise ValueError("days_must_be_positive")
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT expires_at FROM subscriptions WHERE tenant_id=?", (tenant_id,)
+            ).fetchone()
+            if not row:
+                raise ValueError("subscription_not_found")
+            # SQLite computes the extension from the later of now or current expiry.
+            conn.execute(
+                "UPDATE subscriptions SET "
+                "starts_at=COALESCE(starts_at, CURRENT_TIMESTAMP), "
+                "expires_at=datetime(MAX(COALESCE(expires_at, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP), ?), "
+                "status='active' WHERE tenant_id=?",
+                (f"+{days} days", tenant_id),
+            )
+            updated = conn.execute(
+                "SELECT expires_at FROM subscriptions WHERE tenant_id=?", (tenant_id,)
+            ).fetchone()
+            return str(updated["expires_at"])
+
+    def subscription_status(self, tenant_id: int) -> dict | None:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT starts_at, expires_at, daily_price_usdt, status FROM subscriptions "
+                "WHERE tenant_id=?", (tenant_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def create_bet(self, tenant_id: int, player_user_id: int, group_id: int | None,
+                   game_code: str, issue: str, selection: str, amount: float) -> int:
+        with self._db() as conn:
+            if group_id is not None:
+                group = conn.execute(
+                    "SELECT 1 FROM target_groups WHERE id=? AND tenant_id=? AND enabled=1",
+                    (group_id, tenant_id),
+                ).fetchone()
+                if not group:
+                    raise ValueError("group_not_available_for_tenant")
+            cur = conn.execute(
+                "INSERT INTO bets(tenant_id, player_user_id, group_id, game_code, issue, "
+                "selection, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (tenant_id, player_user_id, group_id, game_code, issue, selection, amount),
+            )
+            return int(cur.lastrowid)
+
+    def settle_bet(self, bet_id: int, won: bool, profit: float = 0) -> None:
+        status = "won" if won else "lost"
+        with self._db() as conn:
+            cur = conn.execute(
+                "UPDATE bets SET status=?, profit=? WHERE id=? AND status='pending'",
+                (status, profit if won else -abs(profit), bet_id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("bet_not_pending")
