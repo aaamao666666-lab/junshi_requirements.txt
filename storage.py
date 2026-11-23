@@ -74,13 +74,22 @@ CREATE TABLE IF NOT EXISTS payment_requests (
     reviewed_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE IF NOT EXISTS subscriptions (
+CREATE TABLE IF NOT EXISTS tenant_pricing (
     tenant_id INTEGER PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
-    starts_at TEXT,
-    expires_at TEXT,
-    daily_price_usdt REAL NOT NULL DEFAULT 68 CHECK (daily_price_usdt > 0),
-    status TEXT NOT NULL DEFAULT 'inactive'
-        CHECK (status IN ('inactive', 'active', 'expired'))
+    agreed_price REAL CHECK (agreed_price IS NULL OR agreed_price >= 0),
+    currency TEXT NOT NULL DEFAULT 'USDT',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS player_registrations (
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    player_user_id INTEGER NOT NULL,
+    username TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected')),
+    approved_by INTEGER,
+    approved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, player_user_id)
 );
 CREATE TRIGGER IF NOT EXISTS enforce_player_two_groups
 BEFORE INSERT ON player_group_bindings
@@ -136,7 +145,7 @@ class SQLiteStore:
                 (key, bot_username, owner_username.lstrip("@").lower()),
             )
             row = conn.execute("SELECT id FROM tenants WHERE bot_key_hash=?", (key,)).fetchone()
-            conn.execute("INSERT OR IGNORE INTO subscriptions(tenant_id) VALUES (?)", (row["id"],))
+            conn.execute("INSERT OR IGNORE INTO tenant_pricing(tenant_id) VALUES (?)", (row["id"],))
             return int(row["id"])
 
     def add_admin(self, tenant_id: int, user_id: int, username: str, role: str = "admin") -> None:
@@ -185,57 +194,69 @@ class SQLiteStore:
             ).fetchall()
             return [int(row["group_id"]) for row in rows]
 
-    def create_payment_request(self, tenant_id: int, player_user_id: int,
-                               amount_usdt: float, tx_reference: str = "") -> int:
+    def set_tenant_price(self, tenant_id: int, amount: float, currency: str = "USDT") -> None:
+        """Set a negotiated price for the admin's private records; it never gates player access."""
+        if amount < 0:
+            raise ValueError("price_must_not_be_negative")
+        currency = currency.strip().upper()
+        if not currency or len(currency) > 12:
+            raise ValueError("invalid_currency")
         with self._db() as conn:
             cur = conn.execute(
-                "INSERT INTO payment_requests(tenant_id, player_user_id, amount_usdt, tx_reference) "
-                "VALUES (?, ?, ?, ?)",
-                (tenant_id, player_user_id, amount_usdt, tx_reference.strip()),
+                "UPDATE tenant_pricing SET agreed_price=?, currency=?, updated_at=CURRENT_TIMESTAMP "
+                "WHERE tenant_id=?",
+                (amount, currency, tenant_id),
             )
-            return int(cur.lastrowid)
+            if cur.rowcount != 1:
+                raise ValueError("tenant_not_found")
 
-    def review_payment(self, request_id: int, reviewer_id: int, approved: bool) -> None:
+    def get_tenant_price(self, tenant_id: int) -> dict | None:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT agreed_price, currency, updated_at FROM tenant_pricing WHERE tenant_id=?",
+                (tenant_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def register_player(self, tenant_id: int, player_user_id: int, username: str = "") -> str:
+        """Create a registration request. Access is granted only after admin verification."""
+        with self._db() as conn:
+            conn.execute(
+                "INSERT INTO player_registrations(tenant_id, player_user_id, username, status) "
+                "VALUES (?, ?, ?, 'pending') ON CONFLICT(tenant_id, player_user_id) "
+                "DO UPDATE SET username=excluded.username "
+                "WHERE player_registrations.status != 'approved'",
+                (tenant_id, player_user_id, username.lstrip("@").lower()),
+            )
+            row = conn.execute(
+                "SELECT status FROM player_registrations WHERE tenant_id=? AND player_user_id=?",
+                (tenant_id, player_user_id),
+            ).fetchone()
+            return str(row["status"])
+
+    def verify_player(self, tenant_id: int, player_user_id: int, admin_user_id: int,
+                      approved: bool = True) -> None:
+        """Admin verification; approved registrations receive unlimited access."""
         status = "approved" if approved else "rejected"
         with self._db() as conn:
             cur = conn.execute(
-                "UPDATE payment_requests SET status=?, reviewed_by=?, reviewed_at=CURRENT_TIMESTAMP "
-                "WHERE id=? AND status='pending'",
-                (status, reviewer_id, request_id),
+                "UPDATE player_registrations SET status=?, approved_by=?, "
+                "approved_at=CURRENT_TIMESTAMP WHERE tenant_id=? AND player_user_id=? "
+                "AND status='pending'",
+                (status, admin_user_id, tenant_id, player_user_id),
             )
             if cur.rowcount != 1:
-                raise ValueError("payment_request_not_pending")
+                raise ValueError("registration_not_pending")
 
-
-    def activate_subscription(self, tenant_id: int, days: int = 1) -> str:
-        if days < 1:
-            raise ValueError("days_must_be_positive")
+    def player_has_access(self, tenant_id: int, player_user_id: int) -> bool:
+        """Approved means unrestricted access; there is deliberately no expiry check."""
         with self._db() as conn:
             row = conn.execute(
-                "SELECT expires_at FROM subscriptions WHERE tenant_id=?", (tenant_id,)
+                "SELECT 1 FROM player_registrations WHERE tenant_id=? "
+                "AND player_user_id=? AND status='approved'",
+                (tenant_id, player_user_id),
             ).fetchone()
-            if not row:
-                raise ValueError("subscription_not_found")
-            # SQLite computes the extension from the later of now or current expiry.
-            conn.execute(
-                "UPDATE subscriptions SET "
-                "starts_at=COALESCE(starts_at, CURRENT_TIMESTAMP), "
-                "expires_at=datetime(MAX(COALESCE(expires_at, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP), ?), "
-                "status='active' WHERE tenant_id=?",
-                (f"+{days} days", tenant_id),
-            )
-            updated = conn.execute(
-                "SELECT expires_at FROM subscriptions WHERE tenant_id=?", (tenant_id,)
-            ).fetchone()
-            return str(updated["expires_at"])
-
-    def subscription_status(self, tenant_id: int) -> dict | None:
-        with self._db() as conn:
-            row = conn.execute(
-                "SELECT starts_at, expires_at, daily_price_usdt, status FROM subscriptions "
-                "WHERE tenant_id=?", (tenant_id,)
-            ).fetchone()
-            return dict(row) if row else None
+            return row is not None
 
     def create_bet(self, tenant_id: int, player_user_id: int, group_id: int | None,
                    game_code: str, issue: str, selection: str, amount: float) -> int:
