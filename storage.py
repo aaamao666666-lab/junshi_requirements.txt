@@ -392,6 +392,19 @@ class SQLiteStore:
             )
             return int(cur.lastrowid)
 
+
+    def get_renewal_agreement(self, agreement_id: int) -> dict | None:
+        """Return a single immutable agreement snapshot for rendering its Telegram notice."""
+        with self._db() as conn:
+            row = conn.execute(
+                """SELECT id, tenant_id, player_user_id, terms_version, amount, currency,
+                          period_seconds, receive_address, terms_snapshot, notice_snapshot,
+                          status, accepted_at, activated_at, next_due_at
+                   FROM renewal_agreements WHERE id=?""",
+                (agreement_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def accept_renewal_offer(self, agreement_id: int, player_user_id: int) -> None:
         """Record the player's Telegram consent; this alone does not authorize a wallet charge."""
         with self._db() as conn:
