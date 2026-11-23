@@ -4,7 +4,7 @@ import json
 import asyncio
 import logging
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 import requests
 from storage import SQLiteStore
@@ -29,7 +29,7 @@ SUPER_ADMIN_USERNAME = "am8818888"  # 已锁定你的总管理号 @AM8818888
 # 加拿大28双源开奖接口
 PRIMARY_API_URL = "https://www.lspcpc28.com/api/pc28/list"
 BACKUP_SITE_URL = "https://kkaakj.com/"
-CONFIG_FILE = "junshi_saas_data.json"
+CONFIG_FILE = os.environ.get("CONFIG_FILE", "junshi_saas_data.json")
 
 # 北京时间 (UTC+8)，用于每日报表统计
 BJ_TZ = timezone(timedelta(hours=8))
@@ -617,15 +617,18 @@ async def stop_sub_bot(token: str):
 def start_dummy_server():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            self.send_response(200)
+            body = b"ok" if self.path in ("/", "/healthz") else b"not found"
+            self.send_response(200 if body == b"ok" else 404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(b"Junshi Master Bot is running")
+            self.wfile.write(body)
 
         def log_message(self, format, *args):
             pass
 
     port = int(os.environ.get("PORT", 10000))
-    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 
 async def main():
