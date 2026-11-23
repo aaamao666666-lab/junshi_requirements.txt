@@ -20,7 +20,7 @@ from telegram.ext import (
 # ==========================================
 # 1. 核心配置（已锁定你的总后台主机器人与管理号）
 # ==========================================
-MASTER_BOT_TOKEN = "9002055310:AAFgrl2AVXnRGjWExJqOorinioRrbdKQM6Y"
+MASTER_BOT_TOKEN = os.environ.get("MASTER_BOT_TOKEN", "").strip()
 SUPER_ADMIN_USERNAME = "am8818888"  # 已锁定你的总管理号 @AM8818888
 
 # 加拿大28双源开奖接口
@@ -490,6 +490,8 @@ def start_dummy_server():
 
 
 async def main():
+    if not MASTER_BOT_TOKEN:
+        raise RuntimeError("Missing required environment variable: MASTER_BOT_TOKEN")
     threading.Thread(target=start_dummy_server, daemon=True).start()
 
     master_app = ApplicationBuilder().token(MASTER_BOT_TOKEN).build()
