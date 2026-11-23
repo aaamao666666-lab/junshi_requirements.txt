@@ -11,6 +11,7 @@ class SQLiteStoreTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = SQLiteStore(Path(self.tmp.name) / "test.sqlite3")
         self.tenant = self.store.create_tenant("123456:abcdefghijklmnopqrstuvwxyz", "demo_bot", "@owner")
+        self.store.add_admin(self.tenant, 1, "owner", role="owner")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -56,6 +57,47 @@ class SQLiteStoreTests(unittest.TestCase):
         self.store.register_player(self.tenant, 89, "player2")
         self.store.verify_player(self.tenant, 89, admin_user_id=1, approved=False)
         self.assertFalse(self.store.player_has_access(self.tenant, 89))
+
+
+    def test_renewal_offer_requires_admin_and_snapshots_terms(self):
+        with self.assertRaises(PermissionError):
+            self.store.configure_renewal_terms(self.tenant, 999, "12.5", 2592000,
+                                                "TReceiver", "Agreement", "Notice")
+        version = self.store.configure_renewal_terms(
+            self.tenant, 1, "12.50", 2592000, "TReceiver", "Agreement v1", "Renew notice"
+        )
+        self.assertEqual(version, 1)
+        offer = self.store.create_renewal_offer(self.tenant, 1, 88)
+        self.store.configure_renewal_terms(
+            self.tenant, 1, "20", 2592000, "TReceiver2", "Agreement v2", "Changed"
+        )
+        self.store.accept_renewal_offer(offer, 88)
+        with self.assertRaises(ValueError):
+            self.store.accept_renewal_offer(offer, 88)
+        self.store.activate_renewal(offer, 88, "TWallet", "contract-subscription-1",
+                                    "2026-12-24T00:00:00Z")
+        attempt = self.store.create_renewal_attempt(
+            offer, "agreement-1-period-1", "2026-12-24T00:00:00Z"
+        )
+        self.assertGreater(attempt, 0)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.create_renewal_attempt(
+                offer, "agreement-1-period-1", "2026-12-24T00:00:00Z"
+            )
+        self.store.update_renewal_attempt(attempt, "submitted", txid="tx-001")
+        self.store.update_renewal_attempt(attempt, "confirmed", txid="tx-001")
+        with self.assertRaises(ValueError):
+            self.store.update_renewal_attempt(attempt, "failed", error_detail="duplicate")
+
+    def test_renewal_requires_wallet_authorization_before_active(self):
+        self.store.configure_renewal_terms(self.tenant, 1, "5", 86400, "TReceiver")
+        offer = self.store.create_renewal_offer(self.tenant, 1, 88)
+        self.store.accept_renewal_offer(offer, 88)
+        with self.assertRaises(ValueError):
+            self.store.create_renewal_attempt(offer, "key", "2026-12-01T00:00:00Z")
+        with self.assertRaises(ValueError):
+            self.store.activate_renewal(offer, 88, "", "", "")
+        self.store.cancel_renewal(offer, 88)
 
     def test_bet_is_persisted_and_settled_once(self):
         group = self.store.add_group(self.tenant, -3001, "Bet group")
