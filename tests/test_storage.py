@@ -37,20 +37,25 @@ class SQLiteStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "group_not_available_for_tenant"):
             self.store.bind_player_group(self.tenant, 88, foreign_group)
 
-    def test_payment_review_is_one_time(self):
-        request_id = self.store.create_payment_request(self.tenant, 88, 68, "tx-abc")
-        self.store.review_payment(request_id, 1, True)
-        with self.assertRaisesRegex(ValueError, "payment_request_not_pending"):
-            self.store.review_payment(request_id, 1, False)
+    def test_admin_price_is_configurable_and_has_no_default(self):
+        self.assertIsNone(self.store.get_tenant_price(self.tenant)["agreed_price"])
+        self.store.set_tenant_price(self.tenant, 123.5, "USDT")
+        price = self.store.get_tenant_price(self.tenant)
+        self.assertEqual(price["agreed_price"], 123.5)
+        self.assertEqual(price["currency"], "USDT")
 
+    def test_verified_registration_grants_unlimited_access(self):
+        self.assertEqual(self.store.register_player(self.tenant, 88, "@player"), "pending")
+        self.assertFalse(self.store.player_has_access(self.tenant, 88))
+        self.store.verify_player(self.tenant, 88, admin_user_id=1, approved=True)
+        self.assertTrue(self.store.player_has_access(self.tenant, 88))
+        # Access remains granted without a subscription expiry or payment check.
+        self.assertTrue(self.store.player_has_access(self.tenant, 88))
 
-    def test_subscription_defaults_to_68_and_can_be_activated(self):
-        before = self.store.subscription_status(self.tenant)
-        self.assertEqual(before["daily_price_usdt"], 68)
-        expiry = self.store.activate_subscription(self.tenant, 2)
-        after = self.store.subscription_status(self.tenant)
-        self.assertEqual(after["status"], "active")
-        self.assertTrue(expiry)
+    def test_rejected_registration_does_not_grant_access(self):
+        self.store.register_player(self.tenant, 89, "player2")
+        self.store.verify_player(self.tenant, 89, admin_user_id=1, approved=False)
+        self.assertFalse(self.store.player_has_access(self.tenant, 89))
 
     def test_bet_is_persisted_and_settled_once(self):
         group = self.store.add_group(self.tenant, -3001, "Bet group")
