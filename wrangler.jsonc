@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "kk-telegram-platform",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-24",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "kk-platform",
+      "database_id": "REPLACE_AFTER_CREATING_D1"
+    }
+  ]
+}

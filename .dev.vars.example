@@ -1,0 +1,5 @@
+# Copy to .dev.vars locally. Never commit real values.
+MASTER_BOT_TOKEN=
+MASTER_WEBHOOK_SECRET=
+TOKEN_ENCRYPTION_KEY=
+PUBLIC_WORKER_URL=https://YOUR-WORKER.workers.dev

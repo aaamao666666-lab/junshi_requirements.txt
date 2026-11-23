@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: junshi-telegram-saas
+    runtime: docker
+    plan: starter
+    region: singapore
+    branch: codex/safe-stabilization-2026-11-24
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    healthCheckPath: /healthz
+    disk:
+      name: junshi-persistent-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: MASTER_BOT_TOKEN
+        sync: false
+      - key: ENABLE_GROUP_POSTS
+        value: "false"
+      - key: DATABASE_PATH
+        value: /var/data/junshi.sqlite3
+      - key: CONFIG_FILE
+        value: /var/data/junshi_saas_data.json

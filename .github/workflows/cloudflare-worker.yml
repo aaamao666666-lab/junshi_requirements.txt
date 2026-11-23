@@ -1,0 +1,16 @@
+name: KK Cloudflare Worker checks
+on:
+  push:
+    branches: ["codex/cloudflare-webhook-migration"]
+  pull_request:
+    branches: ["main"]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node --version && npm --version
+      - run: npm install
+      - run: npm run typecheck
