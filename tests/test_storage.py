@@ -44,5 +44,21 @@ class SQLiteStoreTests(unittest.TestCase):
             self.store.review_payment(request_id, 1, False)
 
 
+    def test_subscription_defaults_to_68_and_can_be_activated(self):
+        before = self.store.subscription_status(self.tenant)
+        self.assertEqual(before["daily_price_usdt"], 68)
+        expiry = self.store.activate_subscription(self.tenant, 2)
+        after = self.store.subscription_status(self.tenant)
+        self.assertEqual(after["status"], "active")
+        self.assertTrue(expiry)
+
+    def test_bet_is_persisted_and_settled_once(self):
+        group = self.store.add_group(self.tenant, -3001, "Bet group")
+        bet_id = self.store.create_bet(self.tenant, 91, group, "canada28", "20261124001", "大", 100)
+        self.store.settle_bet(bet_id, True, 100)
+        with self.assertRaisesRegex(ValueError, "bet_not_pending"):
+            self.store.settle_bet(bet_id, False, 100)
+
+
 if __name__ == "__main__":
     unittest.main()
