@@ -7,6 +7,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 import requests
+from storage import SQLiteStore
 # Safe default: no automatic posts are sent to any group.
 ENABLE_GROUP_POSTS = os.environ.get("ENABLE_GROUP_POSTS", "false").lower() == "true"
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -91,6 +92,20 @@ class SaaSManager:
 
 
 manager = SaaSManager()
+store = SQLiteStore(os.environ.get("DATABASE_PATH", "junshi.sqlite3"))
+TENANT_IDS: dict[str, int] = {}
+
+
+def tenant_id_for(token: str) -> int:
+    if token not in TENANT_IDS:
+        cfg = manager.data["sub_bots"].get(token, {})
+        TENANT_IDS[token] = store.create_tenant(
+            token, cfg.get("bot_username", ""), cfg.get("owner_username", "")
+        )
+        if cfg.get("owner_id"):
+            store.add_admin(TENANT_IDS[token], int(cfg["owner_id"]), cfg.get("owner_username", ""), "owner")
+    return TENANT_IDS[token]
+
 BET_STAGES = [100, 200, 400, 800, 1600, 3200]
 
 
@@ -340,11 +355,94 @@ def make_sub_handlers(token: str):
 
     async def sub_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
+        tid = tenant_id_for(token)
         if not check_owner(user):
-            await update.message.reply_text("⛔ 您未被绑定为此机器人的管理号，请联系总后台管理员授权。")
+            if update.effective_chat.type != "private":
+                return
+            status = store.register_player(tid, user.id, user.username or "")
+            if status == "approved":
+                await update.message.reply_text("注册成功")
+                return
+            if status == "pending":
+                await update.message.reply_text("注册申请已提交，请等待管理员验证。")
+                cfg = manager.data["sub_bots"].get(token, {})
+                owner_id = cfg.get("owner_id")
+                if owner_id:
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("通过验证", callback_data=f"reg_approve:{user.id}"),
+                        InlineKeyboardButton("拒绝", callback_data=f"reg_reject:{user.id}")
+                    ]])
+                    await context.bot.send_message(
+                        owner_id,
+                        f"新玩家注册申请：{user.full_name} (@{user.username or '无用户名'}) / ID {user.id}",
+                        reply_markup=keyboard
+                    )
+                return
+        if update.effective_chat.type != "private":
             return
+        cfg = manager.data["sub_bots"].get(token, {})
+        if cfg.get("owner_id") and user.id == cfg.get("owner_id"):
+            store.add_admin(tid, user.id, user.username or "", "owner")
         text, markup = build_sub_panel(token)
         await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
+
+    async def sub_renew_terms(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if not check_owner(user):
+            return
+        raw = update.message.text.partition(" ")[2].strip()
+        parts = [p.strip() for p in raw.split("|")]
+        if len(parts) < 3:
+            await update.message.reply_text(
+                "格式：/renew_terms 金额|周期秒|收款地址|协议内容|通知文案\n"
+                "示例：/renew_terms 20|2592000|TRON地址|双方协商续费条款|续费合作确认"
+            )
+            return
+        try:
+            amount, period, address = parts[:3]
+            terms = parts[3] if len(parts) > 3 else ""
+            notice = parts[4] if len(parts) > 4 else "续费合作确认"
+            tid = tenant_id_for(token)
+            store.add_admin(tid, user.id, user.username or "", "owner")
+            version = store.configure_renewal_terms(
+                tid, user.id, amount, int(period), address, terms, notice, "USDT"
+            )
+            await update.message.reply_text(f"续费条款已保存，版本：{version}")
+        except Exception as exc:
+            await update.message.reply_text(f"保存失败：{str(exc)[:180]}")
+
+    async def sub_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if not check_owner(user):
+            return
+        if not context.args or not context.args[0].isdigit():
+            await update.message.reply_text("用法：/offer 玩家Telegram数字ID")
+            return
+        player_id = int(context.args[0])
+        tid = tenant_id_for(token)
+        if not store.player_has_access(tid, player_id):
+            await update.message.reply_text("该玩家尚未通过注册验证。")
+            return
+        try:
+            agreement_id = store.create_renewal_offer(tid, user.id, player_id)
+            # Fetch immutable offer data through the store's read-only helper.
+            offer = store.get_renewal_agreement(agreement_id)
+            body = (
+                f"{offer['notice_snapshot']}\n\n"
+                f"金额：{offer['amount']} {offer['currency']}\n"
+                f"周期：{offer['period_seconds']} 秒\n"
+                f"收款地址：{offer['receive_address']}\n"
+                f"协议：{offer['terms_snapshot'] or '按双方协商内容执行'}\n\n"
+                "点击同意后，仍需完成一次钱包授权；未完成钱包授权前不会自动扣款。"
+            )
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("同意续费", callback_data=f"renew_accept:{agreement_id}"),
+                InlineKeyboardButton("暂不同意", callback_data=f"renew_reject:{agreement_id}")
+            ]])
+            await context.bot.send_message(player_id, body, reply_markup=keyboard)
+            await update.message.reply_text("续费协议已发送给玩家。")
+        except Exception as exc:
+            await update.message.reply_text(f"发送失败：{str(exc)[:180]}")
 
     async def sub_bindgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -366,10 +464,42 @@ def make_sub_handlers(token: str):
     async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        if not check_owner(query.from_user):
-            return
         cfg = manager.data["sub_bots"].get(token)
         if not cfg:
+            return
+        tid = tenant_id_for(token)
+        if query.data.startswith("reg_approve:") or query.data.startswith("reg_reject:"):
+            if not check_owner(query.from_user):
+                return
+            action, raw_player = query.data.split(":", 1)
+            player_id = int(raw_player)
+            try:
+                store.verify_player(tid, player_id, query.from_user.id, action == "reg_approve")
+                if action == "reg_approve":
+                    await context.bot.send_message(player_id, "注册成功")
+                    await query.edit_message_text("已通过玩家注册验证。")
+                else:
+                    await context.bot.send_message(player_id, "注册申请未通过，请联系管理员。")
+                    await query.edit_message_text("已拒绝玩家注册申请。")
+            except Exception as exc:
+                await query.message.reply_text(f"处理失败：{str(exc)[:160]}")
+            return
+        if query.data.startswith("renew_accept:") or query.data.startswith("renew_reject:"):
+            action, raw_id = query.data.split(":", 1)
+            agreement_id = int(raw_id)
+            try:
+                if action == "renew_accept":
+                    store.accept_renewal_offer(agreement_id, query.from_user.id)
+                    await query.edit_message_text(
+                        "已记录你的续费同意。下一步需要完成一次钱包授权；授权服务尚未连接前，不会发生自动扣款。"
+                    )
+                else:
+                    store.cancel_renewal(agreement_id, query.from_user.id)
+                    await query.edit_message_text("已记录本次不续费。")
+            except Exception as exc:
+                await query.message.reply_text(f"处理失败：{str(exc)[:160]}")
+            return
+        if not check_owner(query.from_user):
             return
         if query.data == "sub_toggle":
             if not cfg.get("auto_bet") and not cfg.get("target_chat_id"):
@@ -448,6 +578,8 @@ async def start_sub_bot(token: str) -> tuple[bool, str]:
         s_start, s_bind, s_cb = make_sub_handlers(token)
         app.add_handler(CommandHandler("start", s_start))
         app.add_handler(CommandHandler("bindgroup", s_bind))
+        app.add_handler(CommandHandler("renew_terms", sub_renew_terms))
+        app.add_handler(CommandHandler("offer", sub_offer))
         app.add_handler(CallbackQueryHandler(s_cb))
         await app.initialize()
         await app.start()
@@ -456,6 +588,10 @@ async def start_sub_bot(token: str) -> tuple[bool, str]:
         bot_username = app.bot.username
         manager.data["sub_bots"][token]["bot_username"] = bot_username
         manager.save()
+        tid = tenant_id_for(token)
+        cfg = manager.data["sub_bots"][token]
+        if cfg.get("owner_id"):
+            store.add_admin(tid, int(cfg["owner_id"]), cfg.get("owner_username", ""), "owner")
 
         manager.running_apps[token] = app
         manager.running_tasks[token] = asyncio.create_task(sub_bot_worker(token, app))
