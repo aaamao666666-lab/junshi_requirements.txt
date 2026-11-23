@@ -7,6 +7,8 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 import requests
+# Safe default: no automatic posts are sent to any group.
+ENABLE_GROUP_POSTS = os.environ.get("ENABLE_GROUP_POSTS", "false").lower() == "true"
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -431,9 +433,10 @@ async def sub_bot_worker(token: str, app):
                         pick = rev_str if streak >= 4 else (last_str if streak >= 2 else None)
                         if pick:
                             amt = BET_STAGES[cfg.get("stage_index", 0)]
-                            bet_cmd = f"{pick} {amt}"
-                            await app.bot.send_message(cfg["target_chat_id"], bet_cmd)
-                            pending_bet = {"pick": pick, "amount": amt}
+                            pending_bet = {"pick": pick, "amount": amt, "issue": latest_issue}
+                            if ENABLE_GROUP_POSTS:
+                                bet_cmd = f"{pick} {amt}"
+                                await app.bot.send_message(cfg["target_chat_id"], bet_cmd)
         except Exception as e:
             logging.error(f"子机器人轮询异常: {e}")
         await asyncio.sleep(15)
